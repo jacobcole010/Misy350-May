@@ -1,38 +1,19 @@
 """
-Module 8 Student Enrollment backend starter.
+Module 8 Student Enrollment backend starter with Streamlit UI.
 
-This file is intentionally procedural. It has functions and top-level
-database code, but no classes yet. Students will first group related behavior
-into an EnrollmentManager class, then separate service and database layers.
-
-App idea:
-    - a student opens a dashboard
-    - the dashboard shows enrolled classes
-    - the student enters an enrollment key to join another class
-    - the database stores courses and enrollment records
-    - a JSON snapshot is exported so students can inspect the seeded data
-
-Focus:
-    - student enrollment behavior
-    - local SQLite database
-    - enrollment keys
-    - soft unenroll using status = "unenrolled"
-
-Out of scope:
-    - Streamlit UI
-    - authentication/session state
-    - caching
-    - export formatting
-    - production health checks
+This file contains both the backend service layer and the Streamlit UI layer.
+The UI provides a two-page dashboard for students to view enrollments and
+manage enrollment keys.
 
 Run with:
-    enrollment_starter.py
+    streamlit run enrollment_starter.py
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import streamlit as st
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,8 +23,8 @@ SNAPSHOT_PATH = Path(__file__).with_name("student_enrollment_snapshot.json")
 
 CURRENT_STUDENT = {
     "user_id": "u100",
-    "name": "Maya Patel",
-    "email": "maya.patel@example.edu",
+    "name": "Jacob Cole",
+    "email": "jacob.cole@example.edu",
 }
 
 STATUS_ENROLLED = "enrolled"
@@ -71,8 +52,8 @@ AVAILABLE_COURSE_KEYS = [
 ]
 
 SAMPLE_ENROLLMENTS = [
-    ("u100", "maya.patel@example.edu", "MISY350", STATUS_ENROLLED),
-    ("u100", "maya.patel@example.edu", "DATA210", STATUS_UNENROLLED),
+    ("u100", "jacob.cole@example.edu", "MISY350", STATUS_ENROLLED),
+    ("u100", "jacob.cole@example.edu", "DATA210", STATUS_UNENROLLED),
     ("u101", "alex@example.edu", "MISY350", STATUS_ENROLLED),
     ("u102", "blair@example.edu", "WEB220", STATUS_ENROLLED),
 ]
@@ -355,34 +336,127 @@ def export_database_snapshot(path: Path = SNAPSHOT_PATH) -> None:
     path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
 
 
+def init_session_state() -> None:
+    """Initialize session state keys for the Streamlit UI."""
+    if "page" not in st.session_state:
+        st.session_state.page = "dashboard"
+    if "selected_course_id" not in st.session_state:
+        st.session_state.selected_course_id = None
+    if "feedback_message" not in st.session_state:
+        st.session_state.feedback_message = ""
+    if "feedback_type" not in st.session_state:
+        st.session_state.feedback_type = ""
+
+
+def render_dashboard() -> None:
+    """Render the student dashboard page."""
+    st.title("Student Dashboard")
+    st.write(f"Welcome, {CURRENT_STUDENT['name']}")
+
+    st.subheader("Your Enrolled Classes")
+    enrolled_courses = get_student_enrollments(CURRENT_STUDENT["user_id"])
+
+    if not enrolled_courses:
+        st.info("You're not enrolled in any classes yet. Enter an enrollment key to enroll.")
+    else:
+        for course in enrolled_courses:
+            with st.container(border=True):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**{course['course_name']}**")
+                    st.write(f"Instructor: {course['instructor']}")
+                    st.write(f"Enrolled: {course['enrolled_at']}")
+                with col2:
+                    if st.button("Go to Class", key=f"go_{course['course_id']}"):
+                        st.session_state.selected_course_id = course["course_id"]
+                        st.session_state.page = "class_detail"
+                        st.rerun()
+                    if st.button("Unenroll", key=f"unenroll_{course['course_id']}"):
+                        soft_unenroll_student(CURRENT_STUDENT["user_id"], course["course_id"])
+                        st.session_state.feedback_message = f"You have unenrolled from {course['course_name']}. You can re-enroll anytime."
+                        st.session_state.feedback_type = "success"
+                        st.rerun()
+
+    st.subheader("Enroll in a New Class")
+    enrollment_key = st.text_input("Enter enrollment key:")
+    if st.button("Enroll"):
+        if enrollment_key:
+            course = get_course_by_key(enrollment_key)
+            if course:
+                result = enroll_with_key(CURRENT_STUDENT["user_id"], CURRENT_STUDENT["email"], enrollment_key)
+                if result:
+                    st.session_state.feedback_message = f"Successfully enrolled in {course['course_name']}!"
+                    st.session_state.feedback_type = "success"
+                    st.rerun()
+            else:
+                st.session_state.feedback_message = "Enrollment key not found. Please check and try again."
+                st.session_state.feedback_type = "error"
+        else:
+            st.session_state.feedback_message = "Please enter an enrollment key."
+            st.session_state.feedback_type = "error"
+
+    if st.session_state.feedback_message:
+        if st.session_state.feedback_type == "success":
+            st.success(st.session_state.feedback_message)
+        elif st.session_state.feedback_type == "error":
+            st.error(st.session_state.feedback_message)
+        elif st.session_state.feedback_type == "warning":
+            st.warning(st.session_state.feedback_message)
+        st.session_state.feedback_message = ""
+        st.session_state.feedback_type = ""
+
+
+def render_class_detail() -> None:
+    """Render the class detail page."""
+    course_id = st.session_state.selected_course_id
+    enrollment_record = get_student_course_record(CURRENT_STUDENT["user_id"], course_id)
+
+    if not enrollment_record:
+        st.error("Course not found.")
+        if st.button("Back to Dashboard"):
+            st.session_state.page = "dashboard"
+            st.session_state.selected_course_id = None
+            st.rerun()
+        return
+
+    # Get course details
+    course = get_course_by_key("")  # This won't work; need to fetch course by ID
+    courses = get_available_course_keys()
+    course = next((c for c in courses if c["course_id"] == course_id), None)
+
+    if not course:
+        st.error("Course details not found.")
+        if st.button("Back to Dashboard"):
+            st.session_state.page = "dashboard"
+            st.session_state.selected_course_id = None
+            st.rerun()
+        return
+
+    st.title(course["course_name"])
+    st.write(f"Instructor: {course['instructor']}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Course ID", course_id)
+    with col2:
+        st.metric("Enrolled Since", enrollment_record["enrolled_at"])
+
+    if st.button("Back to Dashboard"):
+        st.session_state.page = "dashboard"
+        st.session_state.selected_course_id = None
+        st.rerun()
+
+
 def main() -> None:
-    """Small terminal runner for checking behavior before the UI exists."""
+    """Main Streamlit app entry point."""
     create_tables()
     seed_sample_data()
+    init_session_state()
 
-    user_id = CURRENT_STUDENT["user_id"]
-    email = CURRENT_STUDENT["email"]
-
-    print("Current student:")
-    print(CURRENT_STUDENT)
-
-    print("\nAvailable enrollment keys:")
-    print(get_available_course_keys())
-
-    print("\nInitial enrolled classes:")
-    print(get_student_enrollments(user_id))
-
-    print("\nStudent enters key DATA210-SPRING:")
-    print(enroll_with_key(user_id, email, "DATA210-SPRING"))
-
-    print("\nUpdated enrolled classes:")
-    print(get_student_enrollments(user_id))
-
-    print("\nStudent summary:")
-    print(get_student_summary(user_id))
-
-    export_database_snapshot()
-    print(f"\nDatabase snapshot written to: {SNAPSHOT_PATH}")
+    if st.session_state.page == "dashboard":
+        render_dashboard()
+    elif st.session_state.page == "class_detail":
+        render_class_detail()
 
 
 if __name__ == "__main__":
